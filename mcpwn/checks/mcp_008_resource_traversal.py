@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import re
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
 
 class ResourceTraversal(BaseCheck):
@@ -21,6 +21,8 @@ class ResourceTraversal(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
@@ -52,7 +54,10 @@ class ResourceTraversal(BaseCheck):
                     self.finding(
                         description="Resource uses file:// protocol (direct filesystem access)",
                         evidence=f'Resource "{resource.name}" URI: {uri}',
-                        remediation="Avoid file:// URIs. Use application-level resource access with proper authorization.",
+                        remediation=(
+                            "Avoid file:// URIs. Use application-level resource "
+                            "access with proper authorization."
+                        ),
                         resource_uri=uri,
                     )
                 )
@@ -77,7 +82,10 @@ class ResourceTraversal(BaseCheck):
                         self.finding(
                             description=f"Resource may expose sensitive content: {label}",
                             evidence=f'Resource "{resource.name}" URI: {uri}',
-                            remediation=f"Review resource access. {label} should not be directly exposed via MCP resources.",
+                            remediation=(
+                                f"Review resource access. {label} should not be "
+                                "directly exposed via MCP resources."
+                            ),
                             resource_uri=uri,
                             severity=Severity.CRITICAL,
                         )

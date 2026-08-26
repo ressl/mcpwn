@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-from itertools import combinations
-
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
 # Dangerous tool capability pairs
 DANGEROUS_CHAINS = [
-    ({"read_file", "read", "cat", "get_file", "load"}, {"exec", "execute", "run_command", "shell", "eval", "run"}, "Read + Execute = Code injection"),
-    ({"fetch", "fetch_url", "http_get", "download", "request"}, {"write_file", "write", "save", "create_file"}, "Fetch + Write = Arbitrary file write"),
-    ({"list_directory", "ls", "list_files", "glob", "find"}, {"read_file", "read", "cat", "get_file"}, "List + Read = Full filesystem read"),
+    (
+        {"read_file", "read", "cat", "get_file", "load"},
+        {"exec", "execute", "run_command", "shell", "eval", "run"},
+        "Read + Execute = Code injection",
+    ),
+    (
+        {"fetch", "fetch_url", "http_get", "download", "request"},
+        {"write_file", "write", "save", "create_file"},
+        "Fetch + Write = Arbitrary file write",
+    ),
+    (
+        {"list_directory", "ls", "list_files", "glob", "find"},
+        {"read_file", "read", "cat", "get_file"},
+        "List + Read = Full filesystem read",
+    ),
     ({"read_file", "read", "cat"}, {"fetch_url", "http_post", "send", "upload"}, "Read + Send = Data exfiltration"),
     ({"query_db", "sql", "execute_query"}, {"write_file", "write"}, "DB Query + Write = Data dump"),
     ({"get_env", "environment"}, {"fetch_url", "http_post", "send"}, "Env Read + Send = Secret exfiltration"),
@@ -31,6 +41,8 @@ class ToolChaining(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
         tool_names = {t.name.lower() for t in tools}

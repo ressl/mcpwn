@@ -8,10 +8,13 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator
 
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 from mcp.client.sse import sse_client
+from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
-from .models import ToolInfo, ResourceInfo, PromptInfo
+from .models import PromptInfo, ResourceInfo, ToolInfo
+
+CONNECT_TIMEOUT = 30.0
 
 
 class MCPClient:
@@ -22,6 +25,7 @@ class MCPClient:
         self._tools: list[ToolInfo] = []
         self._resources: list[ResourceInfo] = []
         self._prompts: list[PromptInfo] = []
+        self.enumeration_errors: list[str] = []
 
     @property
     def session(self) -> ClientSession:
@@ -38,8 +42,8 @@ class MCPClient:
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 self._session = session
-                await session.initialize()
-                await self._enumerate()
+                await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT)
+                await asyncio.wait_for(self._enumerate(), timeout=CONNECT_TIMEOUT)
                 yield self
                 self._session = None
 
@@ -49,8 +53,19 @@ class MCPClient:
         async with sse_client(url) as (read, write):
             async with ClientSession(read, write) as session:
                 self._session = session
-                await session.initialize()
-                await self._enumerate()
+                await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT)
+                await asyncio.wait_for(self._enumerate(), timeout=CONNECT_TIMEOUT)
+                yield self
+                self._session = None
+
+    @asynccontextmanager
+    async def connect_http(self, url: str) -> AsyncGenerator[MCPClient, None]:
+        """Connect to an MCP server via Streamable HTTP transport."""
+        async with streamable_http_client(url) as (read, write):
+            async with ClientSession(read, write) as session:
+                self._session = session
+                await asyncio.wait_for(session.initialize(), timeout=CONNECT_TIMEOUT)
+                await asyncio.wait_for(self._enumerate(), timeout=CONNECT_TIMEOUT)
                 yield self
                 self._session = None
 
@@ -59,45 +74,64 @@ class MCPClient:
         self._tools = []
         self._resources = []
         self._prompts = []
+        self.enumeration_errors = []
 
         try:
-            result = await self.session.list_tools()
-            for tool in result.tools:
+            tools_result = await self.session.list_tools()
+            for tool in tools_result.tools:
                 self._tools.append(
                     ToolInfo(
                         name=tool.name,
                         description=tool.description or "",
-                        input_schema=tool.inputSchema if hasattr(tool, "inputSchema") else {},
+                        input_schema=(
+                            getattr(tool, "input_schema", None)
+                            or getattr(tool, "inputSchema", None)
+                            or {}
+                        ),
                     )
                 )
         except Exception:
-            pass
+            self.enumeration_errors.append("Failed to list tools")
 
         try:
-            result = await self.session.list_resources()
-            for res in result.resources:
+            resources_result = await self.session.list_resources()
+            for res in resources_result.resources:
                 self._resources.append(
                     ResourceInfo(
                         uri=str(res.uri),
                         name=res.name or "",
                         description=res.description or "" if hasattr(res, "description") else "",
-                        mime_type=res.mimeType or "" if hasattr(res, "mimeType") else "",
+                        mime_type=(
+                            getattr(res, "mime_type", None)
+                            or getattr(res, "mimeType", None)
+                            or ""
+                        ),
                     )
                 )
         except Exception:
-            pass
+            self.enumeration_errors.append("Failed to list resources")
 
         try:
-            result = await self.session.list_prompts()
-            for prompt in result.prompts:
+            prompts_result = await self.session.list_prompts()
+            for prompt in prompts_result.prompts:
+                args = []
+                if hasattr(prompt, "arguments") and prompt.arguments:
+                    args = [
+                        {
+                            "name": arg.name,
+                            "description": arg.description or "" if hasattr(arg, "description") else "",
+                        }
+                        for arg in prompt.arguments
+                    ]
                 self._prompts.append(
                     PromptInfo(
                         name=prompt.name,
-                        description=prompt.description or "" if hasattr(prompt, "description") else "",
+                        description=prompt.description or "",
+                        arguments=args,
                     )
                 )
         except Exception:
-            pass
+            self.enumeration_errors.append("Failed to list prompts")
 
     @property
     def tools(self) -> list[ToolInfo]:
@@ -132,8 +166,10 @@ class MCPClient:
                 timeout=10.0,
             )
             return result
-        except Exception as e:
-            return str(e)
+        except asyncio.TimeoutError:
+            return None
+        except Exception:
+            return None
 
     async def list_tools_raw(self) -> Any:
         """Get raw tool listing for comparison."""

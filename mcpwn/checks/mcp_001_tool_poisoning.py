@@ -5,9 +5,9 @@ from __future__ import annotations
 import base64
 import re
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
 # Patterns that indicate hidden instructions in tool descriptions
 INJECTION_PATTERNS = [
@@ -60,12 +60,20 @@ class ToolPoisoning(BaseCheck):
     severity = Severity.CRITICAL
     description = "Detects malicious instructions hidden in tool descriptions"
 
+    def __init__(self, custom_patterns: list[str] | None = None) -> None:
+        super().__init__()
+        self.patterns = list(INJECTION_PATTERNS)
+        if custom_patterns:
+            self.patterns.extend((p, "Custom pattern") for p in custom_patterns)
+
     async def run(
         self,
         client: MCPClient,
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
@@ -75,14 +83,17 @@ class ToolPoisoning(BaseCheck):
                 continue
 
             # Check for injection patterns
-            for pattern, label in INJECTION_PATTERNS:
+            for pattern, label in self.patterns:
                 match = re.search(pattern, desc, re.IGNORECASE)
                 if match:
                     findings.append(
                         self.finding(
                             description=f"Tool description contains suspicious pattern: {label}",
                             evidence=f'Matched: "{match.group()}" in tool "{tool.name}"',
-                            remediation="Review and sanitize the tool description. Remove any instruction-like content.",
+                            remediation=(
+                                "Review and sanitize the tool description. "
+                                "Remove any instruction-like content."
+                            ),
                             tool_name=tool.name,
                         )
                     )
@@ -130,7 +141,10 @@ class ToolPoisoning(BaseCheck):
                             self.finding(
                                 description="Tool description contains Base64-encoded content",
                                 evidence=f'Decoded content in tool "{tool.name}": "{decoded[:100]}"',
-                                remediation="Remove encoded content from tool descriptions. All instructions should be plaintext.",
+                                remediation=(
+                                    "Remove encoded content from tool descriptions. "
+                                    "All instructions should be plaintext."
+                                ),
                                 tool_name=tool.name,
                             )
                         )
@@ -142,8 +156,14 @@ class ToolPoisoning(BaseCheck):
                 findings.append(
                     self.finding(
                         description="Excessively long tool description may hide instructions",
-                        evidence=f'Tool "{tool.name}" description is {len(desc)} chars (max recommended: {MAX_DESCRIPTION_LENGTH})',
-                        remediation="Keep tool descriptions concise. Long descriptions increase the risk of hidden content.",
+                        evidence=(
+                            f'Tool "{tool.name}" description is {len(desc)} chars '
+                            f"(max recommended: {MAX_DESCRIPTION_LENGTH})"
+                        ),
+                        remediation=(
+                            "Keep tool descriptions concise. Long descriptions "
+                            "increase the risk of hidden content."
+                        ),
                         tool_name=tool.name,
                         severity=Severity.MEDIUM,
                     )

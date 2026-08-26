@@ -1,15 +1,11 @@
-"""Main scanner orchestration."""
-
-from __future__ import annotations
-
+import asyncio
 import time
 from typing import Callable
 
-from .client import MCPClient
-from .checks.base import BaseCheck
-from .checks.registry import get_checks
 from .checks.mcp_007_insecure_transport import InsecureTransport
-from .models import Finding, Severity, ScanTarget, ScanResult
+from .checks.registry import get_checks
+from .client import MCPClient
+from .models import Finding, ScanResult, ScanTarget, Severity
 
 
 class Scanner:
@@ -20,11 +16,15 @@ class Scanner:
         check_ids: list[str] | None = None,
         min_severity: Severity = Severity.LOW,
         timeout: int = 30,
+        aggressive: bool = False,
+        disabled: set[str] | None = None,
+        options: dict[str, dict] | None = None,
         on_finding: Callable[[Finding], None] | None = None,
     ) -> None:
-        self.checks = get_checks(check_ids)
+        self.checks = get_checks(check_ids, disabled=disabled, options=options)
         self.min_severity = min_severity
         self.timeout = timeout
+        self.aggressive = aggressive
         self.on_finding = on_finding
 
     async def scan_stdio(self, command: str) -> ScanResult:
@@ -35,6 +35,17 @@ class Scanner:
     async def scan_sse(self, url: str) -> ScanResult:
         """Scan an MCP server via SSE transport."""
         target = ScanTarget(transport="sse", url=url)
+
+        # Pre-connection transport check
+        transport_check = InsecureTransport()
+        transport_findings = transport_check.check_url(url)
+        result = await self._scan(target)
+        result.findings = transport_findings + result.findings
+        return result
+
+    async def scan_http(self, url: str) -> ScanResult:
+        """Scan an MCP server via Streamable HTTP transport."""
+        target = ScanTarget(transport="http", url=url)
 
         # Pre-connection transport check
         transport_check = InsecureTransport()
@@ -54,6 +65,8 @@ class Scanner:
                 ctx = client.connect_stdio(target.command)
             elif target.transport == "sse" and target.url:
                 ctx = client.connect_sse(target.url)
+            elif target.transport == "http" and target.url:
+                ctx = client.connect_http(target.url)
             else:
                 result.errors.append("Invalid target configuration")
                 return result
@@ -62,20 +75,29 @@ class Scanner:
                 target.tools = connected_client.tools
                 target.resources = connected_client.resources
                 target.prompts = connected_client.prompts
+                result.errors.extend(connected_client.enumeration_errors)
 
                 for check in self.checks:
                     try:
-                        findings = await check.run(
-                            connected_client,
-                            connected_client.tools,
-                            connected_client.resources,
-                            connected_client.prompts,
+                        findings = await asyncio.wait_for(
+                            check.run(
+                                connected_client,
+                                connected_client.tools,
+                                connected_client.resources,
+                                connected_client.prompts,
+                                aggressive=self.aggressive,
+                            ),
+                            timeout=self.timeout,
                         )
                         for finding in findings:
                             if finding.severity >= self.min_severity:
                                 result.findings.append(finding)
                                 if self.on_finding:
                                     self.on_finding(finding)
+                    except asyncio.TimeoutError:
+                        result.errors.append(
+                            f"Check {check.id} timed out after {self.timeout}s"
+                        )
                     except Exception as e:
                         result.errors.append(f"Check {check.id} failed: {e}")
 

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
 
 class InputValidation(BaseCheck):
@@ -19,6 +19,8 @@ class InputValidation(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
@@ -29,7 +31,10 @@ class InputValidation(BaseCheck):
                     self.finding(
                         description="Tool has no input schema defined",
                         evidence=f'Tool "{tool.name}" has no inputSchema',
-                        remediation="Define a JSON Schema for all tool inputs with type, constraints, and descriptions.",
+                        remediation=(
+                            "Define a JSON Schema for all tool inputs with "
+                            "type, constraints, and descriptions."
+                        ),
                         tool_name=tool.name,
                     )
                 )
@@ -80,9 +85,17 @@ class InputValidation(BaseCheck):
                         self.finding(
                             description=f"Parameter lacks validation: {', '.join(issues)}",
                             evidence=f'Tool "{tool.name}" parameter "{param_name}": {", ".join(issues)}',
-                            remediation="Add proper JSON Schema constraints: type, maxLength/pattern for strings, min/max for numbers, items/maxItems for arrays.",
+                            remediation=(
+                                "Add proper JSON Schema constraints: type, "
+                                "maxLength/pattern for strings, min/max for "
+                                "numbers, items/maxItems for arrays."
+                            ),
                             tool_name=tool.name,
-                            severity=Severity.LOW if len(issues) == 1 and "no description" in issues else Severity.MEDIUM,
+                            severity=(
+                                Severity.LOW
+                                if len(issues) == 1 and "no description" in issues
+                                else Severity.MEDIUM
+                            ),
                         )
                     )
 

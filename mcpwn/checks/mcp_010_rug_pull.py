@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
 
 class RugPull(BaseCheck):
@@ -21,6 +21,8 @@ class RugPull(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
@@ -50,7 +52,10 @@ class RugPull(BaseCheck):
                 self.finding(
                     description="New tools appeared between listings (possible rug pull)",
                     evidence=f"Tools added between calls: {', '.join(new_tools)}",
-                    remediation="MCP servers should not dynamically add tools after initial connection. Pin tool listings.",
+                    remediation=(
+                        "MCP servers should not dynamically add tools after "
+                        "initial connection. Pin tool listings."
+                    ),
                 )
             )
 
@@ -79,7 +84,10 @@ class RugPull(BaseCheck):
                     self.finding(
                         description="Tool description changed between listings (rug pull!)",
                         evidence=f'Tool "{name}" description changed from "{desc1[:80]}..." to "{desc2[:80]}..."',
-                        remediation="Tool descriptions must be immutable. Changing descriptions after approval is a rug pull attack.",
+                        remediation=(
+                            "Tool descriptions must be immutable. Changing "
+                            "descriptions after approval is a rug pull attack."
+                        ),
                         tool_name=name,
                     )
                 )

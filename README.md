@@ -2,10 +2,10 @@
 
 **Security scanner for MCP (Model Context Protocol) servers.**
 
-Find vulnerabilities in your MCP servers before attackers do. mcpwn tests for prompt injection, tool poisoning, data exfiltration, SSRF, and more.
+Find vulnerabilities in your MCP servers before attackers do. mcpwn tests for prompt injection, tool poisoning, data exfiltration, SSRF, command injection, secrets exposure, and more.
 
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
-![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
+![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green.svg)
 ![MCP Compatible](https://img.shields.io/badge/MCP-2025--11--05-purple.svg)
 
 ## Why?
@@ -28,6 +28,9 @@ mcpwn fills that gap. It's like `nikto` or `nuclei`, but for MCP servers.
 | MCP-008 | **Resource Traversal** | 🟠 High | Resources that allow path traversal to access unauthorized files |
 | MCP-009 | **Tool Call Chaining** | 🟠 High | Sequences of tool calls that escalate privileges |
 | MCP-010 | **Rug Pull** | 🔴 Critical | Tools that change behavior after initial approval (post-approval manipulation) |
+| MCP-011 | **Prompt Poisoning** | 🟠 High | Malicious instructions hidden in prompt definitions |
+| MCP-012 | **Secrets in Resources** | 🔴 Critical | Resources that expose credentials or secret material |
+| MCP-013 | **Command Injection** | 🔴 Critical | Tools vulnerable to shell metacharacter injection (`--aggressive`) |
 
 ## Quick Start
 
@@ -40,15 +43,87 @@ mcpwn scan --stdio "python my_mcp_server.py"
 # Scan a remote MCP server (SSE)
 mcpwn scan --sse https://mcp.example.com/sse
 
+# Scan a remote MCP server (Streamable HTTP)
+mcpwn scan --http https://mcp.example.com/mcp
+
 # Scan with specific checks only
 mcpwn scan --stdio "python server.py" --checks MCP-001,MCP-002,MCP-003
 
-# Output as JSON
+# Output as JSON or SARIF
 mcpwn scan --stdio "python server.py" --format json --output report.json
+mcpwn scan --stdio "python server.py" --format sarif --output report.sarif
+
+# Enable active probes (internal IPs, callback URLs, injection payloads)
+mcpwn scan --stdio "python server.py" --aggressive
+
+# Use a config file (mcpwn.yaml in the current directory is auto-loaded)
+mcpwn scan --stdio "python server.py" --config mcpwn.yaml
 
 # Scan all MCP servers from Claude Desktop config
 mcpwn scan --claude-config
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Scan completed, no critical or high findings |
+| `1`  | Scan completed with at least one **high** finding |
+| `2`  | Scan completed with at least one **critical** finding |
+| `1`  | Usage error (no target, unknown check ID, bad config) |
+
+Combine with CI:
+
+```bash
+mcpwn scan --stdio "python server.py" --format json --output results.json
+mcpwn check --input results.json --fail-on high   # exits 1 on failure
+```
+
+## Safe vs. aggressive mode
+
+By default mcpwn runs in **safe mode**: it analyzes tool schemas, descriptions, resources, and prompts, and calls tools only with benign test inputs. It **never**:
+
+- probes internal IP ranges (127.0.0.1, 169.254.169.254, cloud metadata endpoints),
+- sends injection payloads (shell metacharacters, prompt-injection sentinels),
+- plants canaries or callback URLs to detect data flow,
+- reads resource contents beyond plain text inspection (MCP-012 reads are benign).
+
+With `--aggressive`, mcpwn additionally:
+
+- probes URL-accepting tools against `http://127.0.0.1/`, the cloud metadata endpoint, and `file:///etc/passwd` (MCP-004 confirms SSRF),
+- sends shell-metacharacter payloads to detect command injection (MCP-013),
+- checks whether tools reflect input into output (MCP-002, injection vectors),
+- plants canary tokens to detect data flow between tools (MCP-003).
+
+Only run aggressive scans against servers you own or have authorization to test.
+
+## Configuration
+
+Create `mcpwn.yaml` for custom rules (auto-loaded from the current directory, or passed via `--config`):
+
+```yaml
+# Custom scan configuration
+severity_threshold: medium  # Skip findings below this level
+timeout: 30                 # Per-check timeout in seconds
+aggressive: false           # Enable active probes
+
+checks:
+  MCP-001:
+    enabled: false          # Disable a check entirely
+    custom_patterns:
+      - "send all data"
+      - "override security"
+  MCP-004:
+    internal_ranges:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+      - "169.254.169.254/32"  # Cloud metadata
+  MCP-003:
+    callback_host: "listener.example.com"  # Exfiltration callback listener (aggressive)
+```
+
+Precedence: **CLI flags > config file > built-in defaults**.
 
 ## Example Output
 
@@ -56,7 +131,7 @@ mcpwn scan --claude-config
 $ mcpwn scan --stdio "python example_server.py"
 
   ╔══════════════════════════════════════════╗
-  ║           mcpwn v0.1.0  🦞              ║
+  ║           mcpwn v0.2.0  🦞              ║
   ║     MCP Security Scanner                ║
   ╚══════════════════════════════════════════╝
 
@@ -87,7 +162,6 @@ $ mcpwn scan --stdio "python example_server.py"
 
   ────────────────────────────────────────────
   Results: 4 findings (2 critical, 1 high, 1 medium)
-  Report saved to: mcpwn-report-2026-02-19.json
 ```
 
 ## How It Works
@@ -110,11 +184,11 @@ $ mcpwn scan --stdio "python example_server.py"
 └──────────┘
 ```
 
-1. **Connect** to the target MCP server (stdio or SSE transport)
+1. **Connect** to the target MCP server (stdio, SSE, or Streamable HTTP transport)
 2. **Enumerate** all tools, resources, and prompts
 3. **Analyze** tool descriptions and schemas for suspicious patterns
-4. **Probe** tools with crafted inputs to detect vulnerabilities
-5. **Report** findings with severity, evidence, and remediation advice
+4. **Probe** tools with crafted inputs to detect vulnerabilities (`--aggressive`)
+5. **Report** findings with severity, evidence, and remediation advice (text, JSON, or SARIF)
 
 ## Checks
 
@@ -130,18 +204,20 @@ Tests tool outputs for content that could inject into the LLM context:
 - Sends benign inputs and analyzes responses for injection markers
 - Tests for output that includes system-level directives
 - Checks if tool outputs contain other tool call requests
+- Aggressive: confirms tools reflecting input into output
 
 ### MCP-003: Data Exfiltration
 Monitors for data leaving the MCP server boundary:
-- DNS exfiltration patterns in tool behavior
-- HTTP callbacks to external domains
-- Embedding sensitive data in error messages
+- External endpoints referenced in tool/resource descriptions
+- URL/endpoint parameters without validation
+- Aggressive: canary tokens planted in tools to detect cross-tool data flow
 
 ### MCP-004: SSRF
 Tests tools that accept URLs or network parameters:
-- Internal IP range probing (127.0.0.1, 169.254.169.254, 10.0.0.0/8)
-- Cloud metadata endpoint detection
-- Protocol smuggling (file://, gopher://)
+- Static analysis of URL parameters for missing restrictions
+- Aggressive: probes internal IP ranges (127.0.0.1, 169.254.169.254, 10.0.0.0/8)
+- Aggressive: cloud metadata endpoint detection
+- Aggressive: protocol smuggling checks (file://)
 
 ### MCP-005: Excessive Permissions
 Enumerates tool capabilities and flags dangerous patterns:
@@ -150,39 +226,18 @@ Enumerates tool capabilities and flags dangerous patterns:
 - Network access without restrictions
 - Database access without row-level security
 
-## Configuration
+### MCP-012: Secrets in Resources
+Reads up to 50 resources (concurrently, max 10 in flight) and scans their content plus descriptions for:
+- AWS access key IDs, GitHub tokens, OpenAI-style keys
+- Private key material
+- Hardcoded credentials in `key=value` form
 
-Create `mcpwn.yaml` for custom rules:
-
-```yaml
-# Custom scan configuration
-severity_threshold: medium  # Skip findings below this level
-timeout: 30                 # Per-check timeout in seconds
-
-checks:
-  MCP-001:
-    enabled: true
-    custom_patterns:
-      - "send all data"
-      - "override security"
-  MCP-004:
-    internal_ranges:
-      - "10.0.0.0/8"
-      - "172.16.0.0/12"
-      - "192.168.0.0/16"
-      - "169.254.169.254/32"  # Cloud metadata
-```
-
-## CI/CD Integration
-
-```yaml
-# GitHub Actions
-- name: Scan MCP Server
-  run: |
-    pip install mcpwn
-    mcpwn scan --stdio "python my_server.py" --format json --output results.json
-    mcpwn check --input results.json --fail-on high
-```
+### MCP-013: Command Injection (aggressive)
+Sends shell-metacharacter payloads (`; echo`, `$(echo)`, backticks, pipes) through
+every string parameter and flags tools whose output shows shell-execution
+evidence (the token on a shell prompt line or as bare command output). Plain
+argument echoes and prose embedding of the value are ignored — echoing input
+is not command execution.
 
 ## See Also
 
@@ -197,13 +252,14 @@ Use both: scan with mcpwn, protect with mcp-firewall.
 
 ## Contributing
 
-PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+PRs welcome!
 
 **Adding a new check:**
 1. Create `mcpwn/checks/mcp_0XX.py`
-2. Implement the `Check` base class
-3. Add test cases in `tests/`
-4. Submit PR
+2. Implement the `BaseCheck` base class (`id`, `name`, `severity`, `description`, `run()`)
+3. Register it in `CHECK_MAP` in `mcpwn/checks/registry.py`
+4. Add test cases in `tests/`
+5. Submit PR
 
 ## About
 

@@ -84,7 +84,7 @@ class PromptInfo:
 
 @dataclass
 class ScanTarget:
-    transport: str  # "stdio" or "sse"
+    transport: str  # "stdio", "sse", or "http"
     command: str | None = None  # for stdio
     url: str | None = None  # for sse
     tools: list[ToolInfo] = field(default_factory=list)

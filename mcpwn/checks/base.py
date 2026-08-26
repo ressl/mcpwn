@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
 
 
 class BaseCheck(ABC):
@@ -23,6 +23,8 @@ class BaseCheck(ABC):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         """Execute the check and return findings."""
         ...

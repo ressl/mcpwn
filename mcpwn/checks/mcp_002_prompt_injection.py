@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from uuid import uuid4
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
+from .util import build_benign_args, extract_text
 
 OUTPUT_INJECTION_PATTERNS = [
     (r"system\s*:\s*", "System prompt in output"),
@@ -22,17 +24,6 @@ OUTPUT_INJECTION_PATTERNS = [
     (r"execute\s+command", "Command execution request in output"),
 ]
 
-# Benign test inputs for different tool types
-BENIGN_INPUTS: dict[str, dict] = {
-    "default": {"input": "test"},
-    "search": {"query": "hello world"},
-    "fetch": {"url": "https://example.com"},
-    "read": {"path": "/tmp/test.txt"},
-    "execute": {"command": "echo test"},
-    "query": {"sql": "SELECT 1"},
-}
-
-
 class PromptInjection(BaseCheck):
     id = "MCP-002"
     name = "Prompt Injection via Tools"
@@ -45,12 +36,14 @@ class PromptInjection(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
         for tool in tools:
             # Build test arguments from schema
-            test_args = self._build_test_args(tool)
+            test_args = build_benign_args(tool)
             if test_args is None:
                 continue
 
@@ -64,7 +57,7 @@ class PromptInjection(BaseCheck):
                 continue
 
             # Extract text content from result
-            text = self._extract_text(result)
+            text = extract_text(result)
             if not text:
                 continue
 
@@ -75,52 +68,67 @@ class PromptInjection(BaseCheck):
                     findings.append(
                         self.finding(
                             description=f"Tool output contains prompt injection: {label}",
-                            evidence=f'Tool "{tool.name}" returned: "...{text[max(0, match.start()-30):match.end()+30]}..."',
-                            remediation="Sanitize tool outputs to remove any content that could be interpreted as LLM instructions.",
+                            evidence=(
+                                f'Tool "{tool.name}" returned: '
+                                f'"...{text[max(0, match.start() - 30):match.end() + 30]}..."'
+                            ),
+                            remediation=(
+                                "Sanitize tool outputs to remove any content that "
+                                "could be interpreted as LLM instructions."
+                            ),
                             tool_name=tool.name,
                         )
                     )
 
+        # Active probe: check if any tool reflects input into its output
+        if aggressive:
+            findings.extend(await self._probe_reflection(client, tools))
+
         return findings
 
-    def _build_test_args(self, tool: ToolInfo) -> dict | None:
-        """Build test arguments from tool schema."""
-        schema = tool.input_schema
-        if not schema:
-            return {}
+    async def _probe_reflection(
+        self, client: MCPClient, tools: list[ToolInfo]
+    ) -> list[Finding]:
+        """Aggressive-only: send a sentinel token and look for reflection."""
+        findings: list[Finding] = []
 
-        properties = schema.get("properties", {})
-        required = schema.get("required", [])
+        for tool in tools:
+            base_args = build_benign_args(tool)
+            if base_args is None:
+                continue
 
-        if not properties and not required:
-            return {}
+            token = f"mcpwn_reflect_{uuid4().hex[:8]}"
+            args = dict(base_args)
+            placed = False
+            for name, schema in tool.input_schema.get("properties", {}).items():
+                if schema.get("type") == "string" and name in args:
+                    args[name] = token
+                    placed = True
+            if not placed:
+                continue
 
-        args = {}
-        for prop_name, prop_schema in properties.items():
-            prop_type = prop_schema.get("type", "string")
-            if prop_type == "string":
-                args[prop_name] = "test"
-            elif prop_type == "integer":
-                args[prop_name] = 1
-            elif prop_type == "number":
-                args[prop_name] = 1.0
-            elif prop_type == "boolean":
-                args[prop_name] = True
-            elif prop_type == "array":
-                args[prop_name] = []
-            elif prop_type == "object":
-                args[prop_name] = {}
+            try:
+                result = await client.call_tool(tool.name, args)
+            except Exception:
+                continue
 
-        return args if args else {}
+            text = extract_text(result) if result is not None else ""
+            if token in text:
+                findings.append(
+                    self.finding(
+                        description="Tool reflects input into output (injection vector)",
+                        evidence=(
+                            f'Tool "{tool.name}" echoed sentinel token "{token}" '
+                            "in its output"
+                        ),
+                        remediation=(
+                            "Tool outputs that echo raw input allow prompt-injection "
+                            "payloads to be reflected into the LLM context. Sanitize "
+                            "or escape returned values."
+                        ),
+                        tool_name=tool.name,
+                        severity=Severity.HIGH,
+                    )
+                )
 
-    def _extract_text(self, result) -> str:
-        """Extract text content from MCP tool result."""
-        if isinstance(result, str):
-            return result
-        if hasattr(result, "content"):
-            parts = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    parts.append(item.text)
-            return "\n".join(parts)
-        return str(result)
+        return findings

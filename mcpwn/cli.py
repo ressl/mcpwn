@@ -11,9 +11,15 @@ import click
 from rich.console import Console
 
 from . import __version__
+from .checks.registry import CHECK_MAP
+from .config import ScanConfig
 from .models import Severity
-from .report import print_report, to_json
+from .report import _result_to_dict, _sarif_log, print_report, to_json
 from .scanner import Scanner
+
+DEFAULT_CONFIG_PATH = Path("mcpwn.yaml")
+DEFAULT_TIMEOUT = 30
+DEFAULT_SEVERITY = "low"
 
 
 @click.group()
@@ -26,55 +32,123 @@ def main() -> None:
 @main.command()
 @click.option("--stdio", "stdio_cmd", help="MCP server command (stdio transport)")
 @click.option("--sse", "sse_url", help="MCP server URL (SSE transport)")
+@click.option("--http", "http_url", help="MCP server URL (Streamable HTTP transport)")
 @click.option("--claude-config", is_flag=True, help="Scan all servers from Claude Desktop config")
+@click.option("--config", "config_file", type=click.Path(exists=True), help="Path to mcpwn.yaml config")
 @click.option("--checks", help="Comma-separated check IDs (e.g., MCP-001,MCP-002)")
-@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "sarif"]), default="text")
 @click.option("--output", "output_file", type=click.Path(), help="Save report to file")
-@click.option("--severity", type=click.Choice(["critical", "high", "medium", "low", "info"]), default="low")
-@click.option("--timeout", type=int, default=30, help="Per-check timeout in seconds")
+@click.option("--severity", type=click.Choice(["critical", "high", "medium", "low", "info"]), default=DEFAULT_SEVERITY)
+@click.option("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Per-check timeout in seconds")
+@click.option(
+    "--aggressive",
+    is_flag=True,
+    help="Enable active probes (internal IPs, callback URLs, injection payloads)",
+)
 def scan(
     stdio_cmd: str | None,
     sse_url: str | None,
+    http_url: str | None,
     claude_config: bool,
+    config_file: str | None,
     checks: str | None,
     output_format: str,
     output_file: str | None,
     severity: str,
     timeout: int,
+    aggressive: bool,
 ) -> None:
     """Scan an MCP server for security vulnerabilities."""
     console = Console()
 
-    if not stdio_cmd and not sse_url and not claude_config:
-        console.print("[red]Error: Specify --stdio, --sse, or --claude-config[/red]")
+    targets = sum(1 for t in (stdio_cmd, sse_url, http_url) if t) + (1 if claude_config else 0)
+    if targets != 1:
+        console.print(
+            "[red]Error: Specify exactly one of --stdio, --sse, --http, or --claude-config[/red]"
+        )
         sys.exit(1)
 
-    check_ids = checks.split(",") if checks else None
-    min_severity = Severity(severity)
+    # Load config file (explicit --config, else ./mcpwn.yaml when present)
+    config: ScanConfig | None = None
+    if config_file:
+        config = ScanConfig.from_file(Path(config_file))
+    elif DEFAULT_CONFIG_PATH.exists():
+        config = ScanConfig.from_file(DEFAULT_CONFIG_PATH)
+
+    # Merge precedence: CLI flag > config file > built-in default.
+    # ParameterSource distinguishes "explicitly passed" from "click default",
+    # so `--severity low` wins even when the config raises the threshold.
+    if config is None:
+        effective_severity = severity
+        effective_timeout = timeout
+        effective_aggressive = aggressive
+    else:
+        source = click.get_current_context().get_parameter_source
+        if source("severity") is not click.core.ParameterSource.DEFAULT:
+            effective_severity = severity
+        else:
+            effective_severity = config.severity_threshold.value
+        if source("timeout") is not click.core.ParameterSource.DEFAULT:
+            effective_timeout = timeout
+        else:
+            effective_timeout = config.timeout
+        effective_aggressive = aggressive or config.aggressive
+
+    if checks:
+        check_ids = checks.split(",")
+        unknown = [cid for cid in check_ids if cid not in CHECK_MAP]
+        if unknown:
+            console.print(f"[red]Unknown check ID: {unknown[0]}[/red]")
+            sys.exit(1)
+    else:
+        check_ids = None
+
+    min_severity = Severity(effective_severity)
 
     scanner = Scanner(
         check_ids=check_ids,
         min_severity=min_severity,
-        timeout=timeout,
+        timeout=effective_timeout,
+        aggressive=effective_aggressive,
+        disabled=config.disabled_ids() if config else None,
+        options=config.check_options() if config else None,
     )
+    if effective_aggressive:
+        console.print("[yellow]Aggressive mode enabled: probing target with active payloads[/yellow]")
 
     if claude_config:
         results = asyncio.run(_scan_claude_config(scanner, console))
     elif stdio_cmd:
         results = [asyncio.run(scanner.scan_stdio(stdio_cmd))]
-    else:
+    elif sse_url:
         results = [asyncio.run(scanner.scan_sse(sse_url))]
+    elif http_url:
+        results = [asyncio.run(scanner.scan_http(http_url))]
+    else:
+        raise AssertionError("unreachable: target validated")
 
     # Output
-    for result in results:
-        if output_format == "json":
-            json_output = to_json(result)
-            if output_file:
-                Path(output_file).write_text(json_output)
-                console.print(f"[green]Report saved to {output_file}[/green]")
-            else:
-                click.echo(json_output)
+    if output_format == "json":
+        if output_file and len(results) > 1:
+            Path(output_file).write_text(json.dumps([_result_to_dict(r) for r in results], indent=2))
+            console.print(f"[green]Report saved to {output_file}[/green]")
         else:
+            for result in results:
+                json_output = to_json(result)
+                if output_file:
+                    Path(output_file).write_text(json_output)
+                    console.print(f"[green]Report saved to {output_file}[/green]")
+                else:
+                    click.echo(json_output)
+    elif output_format == "sarif":
+        sarif_output = json.dumps(_sarif_log(results), indent=2)
+        if output_file:
+            Path(output_file).write_text(sarif_output)
+            console.print(f"[green]Report saved to {output_file}[/green]")
+        else:
+            click.echo(sarif_output)
+    else:
+        for result in results:
             print_report(result, console)
             if output_file:
                 Path(output_file).write_text(to_json(result))
@@ -93,12 +167,21 @@ def scan(
 @click.option("--input", "input_file", required=True, type=click.Path(exists=True))
 @click.option("--fail-on", type=click.Choice(["critical", "high", "medium", "low"]), default="high")
 def check(input_file: str, fail_on: str) -> None:
-    """Check a JSON report and exit with non-zero if findings exceed threshold."""
+    """Check JSON report(s) and exit with non-zero if findings exceed threshold.
+
+    Accepts a single scan report or the JSON array produced by
+    ``--claude-config --format json --output``.
+    """
     data = json.loads(Path(input_file).read_text())
+    reports = data if isinstance(data, list) else [data]
     threshold = Severity(fail_on)
 
-    findings = data.get("findings", [])
-    over_threshold = [f for f in findings if Severity(f["severity"]) >= threshold]
+    over_threshold = [
+        f
+        for report in reports
+        for f in report.get("findings", [])
+        if Severity(f["severity"]) >= threshold
+    ]
 
     console = Console()
     if over_threshold:

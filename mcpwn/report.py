@@ -7,9 +7,8 @@ from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 
+from . import __version__
 from .models import ScanResult, Severity
 
 
@@ -22,7 +21,7 @@ def print_report(result: ScanResult, console: Console | None = None) -> None:
     console.print()
     console.print(
         Panel(
-            "[bold blue]mcpwn v0.1.0[/bold blue]  🦞\n[dim]MCP Security Scanner[/dim]",
+            f"[bold blue]mcpwn v{__version__}[/bold blue]  🦞\n[dim]MCP Security Scanner[/dim]",
             border_style="blue",
             expand=False,
         )
@@ -33,7 +32,7 @@ def print_report(result: ScanResult, console: Console | None = None) -> None:
     if target.transport == "stdio":
         console.print(f"  [dim]Target:[/dim] {target.command} (stdio)")
     else:
-        console.print(f"  [dim]Target:[/dim] {target.url} (SSE)")
+        console.print(f"  [dim]Target:[/dim] {target.url} ({target.transport.upper()})")
 
     console.print(f"  [dim]Tools found:[/dim] {len(target.tools)}")
     console.print(f"  [dim]Resources found:[/dim] {len(target.resources)}")
@@ -89,11 +88,11 @@ def print_report(result: ScanResult, console: Console | None = None) -> None:
     console.print()
 
 
-def to_json(result: ScanResult) -> str:
-    """Convert scan result to JSON string."""
-    data = {
+def _result_to_dict(result: ScanResult) -> dict:
+    """Convert a scan result to a plain dict (shared by to_json and CLI output)."""
+    return {
         "scanner": "mcpwn",
-        "version": "0.1.0",
+        "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "target": {
             "transport": result.target.transport,
@@ -126,4 +125,68 @@ def to_json(result: ScanResult) -> str:
         ],
         "errors": result.errors,
     }
-    return json.dumps(data, indent=2)
+
+
+def to_json(result: ScanResult) -> str:
+    """Convert scan result to JSON string."""
+    return json.dumps(_result_to_dict(result), indent=2)
+
+
+def _sarif_level(severity: Severity) -> str:
+    """Map a severity to a SARIF result level."""
+    if severity in (Severity.CRITICAL, Severity.HIGH):
+        return "error"
+    if severity == Severity.MEDIUM:
+        return "warning"
+    return "note"
+
+
+def _sarif_run(result: ScanResult) -> dict:
+    """Build a single SARIF run for one scan result."""
+    rules: dict[str, dict] = {}
+    for f in result.findings:
+        if f.check_id not in rules:
+            rules[f.check_id] = {
+                "name": f.check_name.replace(" ", ""),
+                "description": f.description,
+            }
+
+    return {
+        "tool": {
+            "driver": {
+                "name": "mcpwn",
+                "version": __version__,
+                "informationUri": "https://github.com/ressl/mcpwn",
+                "rules": [
+                    {
+                        "id": cid,
+                        "name": info["name"],
+                        "shortDescription": {"text": info["description"]},
+                    }
+                    for cid, info in rules.items()
+                ],
+            }
+        },
+        "results": [
+            {
+                "ruleId": f.check_id,
+                "level": _sarif_level(f.severity),
+                "message": {"text": f"{f.description} — {f.evidence}"},
+            }
+            for f in result.findings
+        ],
+    }
+
+
+def to_sarif(result: ScanResult) -> str:
+    """Convert a scan result to a SARIF 2.1.0 JSON string."""
+    return json.dumps(_sarif_log([result]), indent=2)
+
+
+def _sarif_log(results: list[ScanResult]) -> dict:
+    """Build a SARIF log with one run per scan result."""
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [_sarif_run(r) for r in results],
+    }

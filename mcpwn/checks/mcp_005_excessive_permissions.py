@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
+from typing import Any
 
-from .base import BaseCheck
 from ..client import MCPClient
-from ..models import Finding, Severity, ToolInfo, ResourceInfo, PromptInfo
+from ..models import Finding, PromptInfo, ResourceInfo, Severity, ToolInfo
+from .base import BaseCheck
 
-DANGEROUS_CAPABILITIES = {
+DANGEROUS_CAPABILITIES: dict[str, dict[str, Any]] = {
     "file_write": {
         "keywords": ["write_file", "create_file", "save_file", "write", "overwrite", "append_file"],
         "description_hints": ["write to", "create file", "save to disk", "modify file"],
@@ -60,6 +60,8 @@ class ExcessivePermissions(BaseCheck):
         tools: list[ToolInfo],
         resources: list[ResourceInfo],
         prompts: list[PromptInfo],
+        *,
+        aggressive: bool = False,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
@@ -95,7 +97,10 @@ class ExcessivePermissions(BaseCheck):
 
                     findings.append(
                         self.finding(
-                            description=f"Tool has {cap_info['label']}{' (with some restrictions)' if has_restrictions else ' (unrestricted)'}",
+                            description=(
+                                f"Tool has {cap_info['label']}"
+                                f"{' (with some restrictions)' if has_restrictions else ' (unrestricted)'}"
+                            ),
                             evidence=f'Tool "{tool.name}": {match_source}',
                             remediation=(
                                 f"Restrict {cap_info['label'].lower()}. "
